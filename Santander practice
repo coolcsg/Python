@@ -1,7 +1,14 @@
-## 확률밀도함수를 이용해 feature를 추출하고, PCA로 추출한 feature 중에 eigenvector만 사용하여
-## Neural Network의 input으로 활용하는 예제
-## Bayesian Optimization을 활용하여 최적화
 
+# 문제 정의 : Santander의 고객 구매 확률을 예측
+# 방법 : 
+# 1. 확률밀도함수를 이용해 feature를 추출
+# 2. PCA를 이용하여 feature 중에 중요하다고 판단되는 eigenvector 추출
+# 3. PCA의 eigenvector를 input으로 Deep learning과 Bayesian Optimization을 활용하여 구매 확률 도출
+# 검증 결과 : test 데이터에 대한 구매확률 검토 시 약0.63
+
+# 향후 진행 방향
+# 1.  Deep learning 모델 최적화 추가 진행
+# 2. light GBM 같은 최신 알고리즘 검토
 
 import numpy as np
 import pandas as pd
