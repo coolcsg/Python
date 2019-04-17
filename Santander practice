@@ -1,0 +1,217 @@
+## 확률밀도함수를 이용해 feature를 추출하고, PCA로 추출한 feature 중에 eigenvector만 사용하여
+## Neural Network의 input으로 활용하는 예제
+## Bayesian Optimization을 활용하여 최적화
+
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, RobustScaler, MinMaxScaler, normalize
+from sklearn.model_selection import train_test_split, KFold #train과 test 분리
+import matplotlib
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits import mplot3d
+import os
+from keras.utils import to_categorical
+from keras import models
+from keras import layers
+from keras.callbacks import EarlyStopping
+import keras
+import tensorflow as tf
+import copy
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import precision_score, accuracy_score
+from GPyOpt.methods import BayesianOptimization
+from numpy.linalg import inv
+from copy import copy
+from scipy import stats
+from keras.layers.normalization import BatchNormalization
+
+os.chdir('C:\\Users\\coolcsg\\Downloads\\santander-customer-transaction-prediction')
+
+train = pd.read_csv('train.csv')
+test = pd.read_csv('test.csv')
+
+tmp = copy(train.loc[train['target'] == 1])
+
+# 데이터 불균형 문제를 위해 low group 데이터를 증가
+for i in range(3):
+    train = pd.concat([train, tmp], axis = 0)
+    print(train.shape)
+    
+    
+train_num = train.select_dtypes(exclude=['object'])
+train_num.drop('target', axis=1, inplace=True)
+
+train_pdf = copy(train_num)
+X_test = test.select_dtypes(exclude=['object'])
+
+# test와 train을 합쳐서 pdf로 변환
+nc_Xtrain = train_num.shape[0]
+nc_Xtest = X_test.shape[0]
+merged = pd.concat([train_num, X_test], axis=0)
+for i in range(merged.shape[1]):
+    tmp = StandardScaler().fit_transform(merged.iloc[:,i:i+1])
+    pdf = stats.norm.pdf(tmp)
+    merged.iloc[:,i] = pdf
+
+train_pdf = merged.iloc[0:nc_Xtrain,:]
+X_test = merged.iloc[(nc_Xtrain):merged.shape[0],:]
+
+
+### PCA로 필요한 벡터만 추출
+ncomps = 20
+from sklearn.decomposition import PCA
+pca = PCA(n_components = ncomps)
+pca.fit(train_pdf)
+X_scores = pca.transform(train_pdf)
+
+# train에서 구한 로딩으로 X_test도 pca 벡터로 변환
+X_loadings = pca.components_.T * np.sqrt(pca.explained_variance_)
+X_test_ptp = X_loadings.T.dot(X_loadings)
+X_test_ptp_inv = inv(X_test_ptp)
+X_test_xp = X_test.dot(X_loadings)
+X_test_pca = X_test_xp.dot(X_test_ptp_inv)
+
+
+X_train_pca = pd.DataFrame.from_records(X_scores)
+X_train_pca.shape, train.shape
+
+
+df = pd.merge(train['target'], X_train_pca, how = 'left', left_index=True, right_index=True)
+df_train, df_val = train_test_split(df, test_size = 0.3, random_state=0)
+
+X = df_train.drop(columns='target')
+Y = df_train['target']
+X_val = df_val.drop(columns='target')
+Y_val = df_val['target']
+
+# gpu 설정 확인
+config = tf.ConfigProto( device_count = {'GPU': 1 , 'CPU': 56} ) 
+sess = tf.Session(config=config) 
+keras.backend.set_session(sess)
+
+# Bayesian 최적화에 사용할 파라미터 설정
+domain = [{'name':'lr','type':'discrete','domain':(0.0001,0.00001,0.000001)},
+           {'name':'n_node1','type':'discrete','domain':(300,400,500)},
+           {'name':'n_node2','type':'discrete','domain':(300,400,500)},
+           {'name':'n_node3','type':'discrete','domain':(300,400,500)},
+           {'name':'epoch','type':'discrete','domain':(100,200,300)},
+           {'name':'batchsize','type':'discrete','domain':(1000,2000,3000)}]
+           
+           
+def objective_function(args):
+    model = models.Sequential()    
+    lr = args[0,0]
+#    beta_1 = args[1]
+#    beta_2 = args[2]
+    n_node1 = args[0,1].astype(int)
+    n_node2 = args[0,2].astype(int)
+    n_node3 = args[0,3].astype(int)
+#     n_node4 = args[0,4].astype(int)
+    epochs = args[0,4].astype(int)
+    batchsize = args[0,5].astype(int)
+    print("lr : ",lr)
+    print("n_node1: ",n_node1)
+    print("n_node2: ",n_node2)
+    print("n_node3: ", n_node3)
+#     print("n_node4: " ,n_node4)
+    
+      
+    model.add(layers.Dense(n_node1, activation = 'relu', input_dim=X.shape[1]))
+    model.add(BatchNormalization())
+    model.add(layers.Dense(n_node1, activation='relu'))
+    model.add(BatchNormalization())
+    model.add(layers.Dense(n_node2, activation='relu'))
+    model.add(BatchNormalization())
+    model.add(layers.Dense(n_node3, activation='relu'))
+    model.add(BatchNormalization())
+    model.add(layers.Dense(1, activation='sigmoid'))
+    
+    model.summary()    
+    
+    adam = keras.optimizers.Adam(lr=lr, beta_1=0.98, beta_2=0.98, decay=0.0, amsgrad=False)
+    earlystop = EarlyStopping(monitor='var_acc', patience = 20, mode = 'auto')
+    list = [earlystop]
+    model.compile(optimizer = adam, loss = "binary_crossentropy", metrics = ["accuracy"])                
+    result = model.fit(X, Y, 
+                        epochs = epochs, 
+                        batch_size = batchsize,
+                        validation_data=(X_val,Y_val), 
+                        callbacks = list)
+    
+    loss = model.evaluate(X_val, Y_val, batch_size = batchsize)
+#    print('loss: {0}'.format(loss))
+    y_pred = model.predict(X_val)
+    
+    criteria = 0.5
+    y_pred[y_pred >= criteria] = 1
+    y_pred[y_pred < criteria] = 0
+    acc = accuracy_score(Y_val, y_pred)
+
+    return (1-acc)
+
+
+myBopt = BayesianOptimization(f = objective_function, domain = domain)
+myBopt.run_optimization(max_iter=15)
+myBopt.plot_acquisition()
+print(myBopt.x_opt) #optimized parameter check!!
+
+N, _ = myBopt.X.shape
+for i in range(N):
+    if np.array_equal(myBopt.x_opt, myBopt.X[i, :]):
+        print(1 - myBopt.Y[i,:])  # accuracy 변환
+        
+        
+# 최적화를 통해 찾은 파라미터로 모델을 다시 한번 돌려 확인!
+# 설정된 hyperparameter 가져와서 다시 계산
+lr = 1e-5
+n_node1 = 100 
+n_node2 = 100
+n_node3 = 100
+epochs = 100
+batchsize = 200 
+
+model = models.Sequential()    
+model.add(layers.Dense(n_node1, activation = 'relu', input_shape=(X.shape[1],)))
+model.add(BatchNormalization())
+model.add(layers.Dense(n_node1, activation='relu'))
+model.add(BatchNormalization())
+model.add(layers.Dense(n_node2, activation='relu'))
+model.add(BatchNormalization())
+model.add(layers.Dense(n_node3, activation='relu'))
+model.add(BatchNormalization())
+model.add(layers.Dense(1, activation = 'sigmoid'))
+model.summary()    
+
+earlystop = EarlyStopping(monitor='var_acc', patience = 5, mode = 'auto')
+adam = keras.optimizers.Adam(lr=lr, beta_1=0.98, beta_2=0.98, decay=0.0, amsgrad=False)
+model.compile(optimizer = adam, loss = "binary_crossentropy", metrics = ["accuracy"])                
+result = model.fit(
+                    X, Y, 
+                    epochs = epochs, 
+                    batch_size = batchsize,
+                    validation_data=(X_val,Y_val),
+                    callbacks = [earlystop])
+
+loss = model.evaluate(X_val, Y_val, batch_size = batchsize)
+#    print('loss: {0}'.format(loss))
+y_pred = model.predict(X_val)
+
+criteria = 0.5
+y_pred[y_pred >= criteria] = 1
+y_pred[y_pred < criteria] = 0
+y_pred = model.predict(X_val)
+
+# X_test로 submission을 결과값 도출
+y_result = model.predict(X_test_pca)
+yy = y_result.flatten()
+submission = pd.read_csv('sample_submission.csv', engine='python')
+submission['target'] = yy
+submission.to_csv('result.csv', index=False)
+
+## 확인 결과 0.63 정도 나와서 생각보다 매우 낮다. 
+## 딥러닝 최적화에 공을 들이지 않은게 이유일 가능성이 있고,
+## lightGBM같은 알고리즘을 사용하면 훨씬 올라갈 가능성이 큼.
+   
